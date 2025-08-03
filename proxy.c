@@ -1,3 +1,24 @@
+
+/**
+ * proxy.c - Simple HTTP proxy server
+ *
+ * This program implements a basic HTTP proxy server that forwards client
+ * requests to servers and returns the responses. It handles multiple clients
+ * using select()/poll() or multithreading.
+ *
+ * Features:
+ *  - Parses HTTP GET requests
+ *  - Forwards requests to target web servers
+ *  - Returns the server's response to the client
+ *
+ * Technologies:
+ *  - POSIX sockets (AF_INET, SOCK_STREAM)
+ *  - Select-based I/O multiplexing (or pthreads, if used)
+ *
+ * Author: Ayla Tabi
+ * Date: August 2025
+ */
+
 #include <regex.h>
 #include<stdio.h>
 #include<stdlib.h>
@@ -24,6 +45,21 @@ typedef struct {
     char timestamp[100];
 } cache;
 cache *cache_array;
+
+
+/**
+ * Parses an HTTP request message to extract method, URL, protocol, and hostname.
+ *
+ * This function uses regex to parse the request line and headers:
+ *  - Extracts the HTTP method, URL, and protocol version from the request line.
+ *  - Extracts the "Host" header value for the hostname.
+ *
+ * @param client_message The full HTTP request message as a string.
+ * @param method Buffer to store the HTTP method (e.g., "GET").
+ * @param url Buffer to store the URL path (e.g., "/index.html").
+ * @param protocol Buffer to store the protocol (e.g., "HTTP/1.1").
+ * @param hostname Buffer to store the hostname extracted from "Host" header.
+ */
 
 void get_request_parameters(char *client_message, char *method, char *url, char *protocol, char *hostname){
 
@@ -70,6 +106,15 @@ void get_request_parameters(char *client_message, char *method, char *url, char 
  
 }
 
+/**
+ * Sends the appropriate HTTP Content-Type header to the client based on the file extension.
+ *
+ *
+ * @param client_sock The client socket file descriptor.
+ * @param method The HTTP method (e.g., "GET").
+ * @param full_url_path The full URL path requested by the client.
+ * @param protocol The HTTP protocol version (e.g., "HTTP/1.1").
+ */
 void content_type_processing(int client_sock, char *method, char *full_url_path, char *protocol){
     char *extension;
     char header[256];
@@ -82,6 +127,12 @@ void content_type_processing(int client_sock, char *method, char *full_url_path,
     }
 }
 
+/**
+ * Searches the cache array for an entry matching the given MD5 hash.
+ *
+ * @param hash_output The MD5 hash string to search for.
+ * @return The index of the cache entry if found; otherwise, -1.
+ */
 int find_url(char *hash_output){
     for (int i = 0; i < array_size; i++) {
         if (strcmp(cache_array[i].md5hash, hash_output) == 0) {
@@ -90,6 +141,18 @@ int find_url(char *hash_output){
     }
     return -1;
 }
+
+/**
+ * Computes the MD5 hash of the given input string.
+ *
+ * Uses OpenSSL's EVP (Envelope) library functions to compute the MD5 digest.
+ * The resulting hash is returned as a null-terminated hexadecimal string.
+ *
+ * @param input The input string to hash.
+ * @param hash_output Buffer to store the resulting MD5 hash as a hex string.
+ *                    Must be at least 33 bytes long to hold 32 hex chars + null terminator.
+ *
+ */
 void compute_md5(const char *input, char *hash_output) {
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     unsigned char hash[EVP_MAX_MD_SIZE];
@@ -104,6 +167,30 @@ void compute_md5(const char *input, char *hash_output) {
     }
     hash_output[hash_lengh * 2] = '\0'; 
 }
+
+/**
+ * Sends an HTTP request to the destination server, utilizing a timed cache.
+ *
+ * This function implements a caching proxy behavior:
+ *  - Computes an MD5 hash of the requested URL to uniquely identify cache entries.
+ *  - Checks if the requested resource’s file extension is cacheable.
+ *  - If the resource is cacheable, looks up the cache metadata array for a cached
+ *    copy and checks if it has expired (based on a 15-second freshness threshold).
+ *  - If a fresh cached copy exists, serves it directly to the client.
+ *  - Otherwise, connects to the destination server, forwards the request,
+ *    receives the response, saves it in the cache, and then serves it to the client.
+ *
+ * The function also handles DNS resolution, socket creation, and file I/O for caching.
+ *
+ * @param client_sock The client socket file descriptor to send the response to.
+ * @param bytesRead Number of bytes read from the client request buffer.
+ * @param buffer The HTTP request data received from the client.
+ * @param hostname The hostname of the destination server.
+ * @param portnum The port number of the destination server (default 80).
+ * @param method HTTP method string (e.g., "GET").
+ * @param url The requested URL.
+ * @param protocol The HTTP protocol version (e.g., "HTTP/1.1").
+ */
 void send_message_to_server(int client_sock, ssize_t bytesRead, char *buffer, char *hostname, int portnum, char *method, char *url, char *protocol){
     char header[256];
    
@@ -307,7 +394,17 @@ void send_message_to_server(int client_sock, ssize_t bytesRead, char *buffer, ch
 }
 
 
-
+/**
+ * Checks whether the given URL is blocklisted.
+ *
+ * If the URL matches an entry in the "blocklist" file, a 403 Forbidden response
+ * is sent to the client and the function returns 1.
+ *
+ * @param client_sock The socket file descriptor for the client.
+ * @param url The URL being requested.
+ * @param protocol The HTTP protocol version (e.g., "HTTP/1.1").
+ * @return 1 if the URL is blocklisted, 0 if not, -1 on error.
+ */
 int handle_blocklist(int client_sock, char *url, char *protocol){
     char header[256];
     char body[512];
@@ -349,6 +446,18 @@ int handle_blocklist(int client_sock, char *url, char *protocol){
     
     return 0;
 }
+
+/**
+ * Handles a single client connection.
+ *
+ * Reads the HTTP request from the client, parses the method, URL, and protocol.
+ * If the request is a GET, it checks whether the URL is blocklisted.
+ * If allowed, it forwards the request to the destination server and sends back
+ * the server's response to the client.
+ *
+ * @param pclient Pointer to a dynamically allocated client socket file descriptor.
+ * @return NULL
+ */
 
 void* handle_connection(void* p_client_sock){
     
@@ -413,6 +522,15 @@ void* handle_connection(void* p_client_sock){
    
 }
 //  http://localhost:8888/index.html
+/**
+ * Main server loop: accepts incoming client connections and handles each
+ * connection in a new thread. Uses pthreads for concurrency.
+ *
+ * For each accepted connection:
+ *  - Allocates memory to store the client socket descriptor
+ *  - Creates a new thread that runs handle_connection()
+ *  - Detaches the thread so system resources are automatically cleaned up
+ */
 int main(int argc , char *argv[]){
 
     
